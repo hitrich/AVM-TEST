@@ -1,42 +1,43 @@
-package AVM_TEST
+// (c) 2019-2020, Ava Labs, Inc. All rights reserved.
+// See the file LICENSE for licensing terms.
+
+package timestampvm
 
 import (
+	"errors"
+	"net/http"
+
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/utils/formatting"
-	"net/http"
+	"github.com/ava-labs/avalanchego/utils/json"
+)
+
+var (
+	errBadData     = errors.New("data must be base 58 repr. of 32 bytes")
+	errNoSuchBlock = errors.New("couldn't get block from database. Does it exist?")
 )
 
 // Service is the API service for this VM
 type Service struct{ vm *VM }
 
-// ProposeBlockArgs are the arguments to ProposeValue
+// ProposeBlockArgs are the arguments to function ProposeValue
 type ProposeBlockArgs struct {
-	// Data for the new block. Must be base 58 encoding (with checksum) of 32 bytes.
-	Data string
+	// Data in the block. Must be base 58 encoding of 32 bytes.
+	Data string `json:"data"`
 }
 
 // ProposeBlockReply is the reply from function ProposeBlock
-type ProposeBlockReply struct {
-	// True if the operation was successful
-	Success bool
-}
+type ProposeBlockReply struct{ Success bool }
 
 // ProposeBlock is an API method to propose a new block whose data is [args].Data.
+// [args].Data must be a string repr. of a 32 byte array
 func (s *Service) ProposeBlock(_ *http.Request, args *ProposeBlockArgs, reply *ProposeBlockReply) error {
-	// Parse the data given as argument to bytes
-	byteFormatter := formatting.CB58{}
-	if err := byteFormatter.FromString(args.Data); err != nil {
+	bytes, err := formatting.Decode(formatting.CB58, args.Data)
+	if err != nil || len(bytes) != dataLen {
 		return errBadData
 	}
-	// Ensure the data is 32 bytes
-	dataSlice := byteFormatter.Bytes
-	if len(dataSlice) != 32 {
-		return errBadData
-	}
-	// Convert the data from a byte slice to byte array
-	var data [dataLen]byte
-	copy(data[:], dataSlice[:dataLen])
-	// Invoke proposeBlock to trigger creation of block with this data
+	var data [dataLen]byte         // The data as an array of bytes
+	copy(data[:], bytes[:dataLen]) // Copy the bytes in dataSlice to data
 	s.vm.proposeBlock(data)
 	reply.Success = true
 	return nil
@@ -44,10 +45,10 @@ func (s *Service) ProposeBlock(_ *http.Request, args *ProposeBlockArgs, reply *P
 
 // APIBlock is the API representation of a block
 type APIBlock struct {
-	Timestamp int64  `json:"timestamp"` // Timestamp of most recent block
-	Data      string `json:"data"`      // Data in the most recent block. Base 58 repr. of 5 bytes.
-	ID        string `json:"id"`        // String repr. of ID of the most recent block
-	ParentID  string `json:"parentID"`  // String repr. of ID of the most recent block's parent
+	Timestamp json.Uint64 `json:"timestamp"` // Timestamp of most recent block
+	Data      string      `json:"data"`      // Data in the most recent block. Base 58 repr. of 5 bytes.
+	ID        string      `json:"id"`        // String repr. of ID of the most recent block
+	ParentID  string      `json:"parentID"`  // String repr. of ID of the most recent block's parent
 }
 
 // GetBlockArgs are the arguments to GetBlock
@@ -65,8 +66,6 @@ type GetBlockReply struct {
 // GetBlock gets the block whose ID is [args.ID]
 // If [args.ID] is empty, get the latest block
 func (s *Service) GetBlock(_ *http.Request, args *GetBlockArgs, reply *GetBlockReply) error {
-	// If an ID is given, parse its string representation to an ids.ID
-	// If no ID is given, ID becomes the ID of last accepted block
 	var ID ids.ID
 	var err error
 	if args.ID == "" {
@@ -78,23 +77,20 @@ func (s *Service) GetBlock(_ *http.Request, args *GetBlockArgs, reply *GetBlockR
 		}
 	}
 
-	// Get the block from the database
 	blockInterface, err := s.vm.GetBlock(ID)
 	if err != nil {
-		return errors.New("error getting data from database")
+		return errNoSuchBlock
 	}
 
 	block, ok := blockInterface.(*Block)
-	if !ok { // Should never happen but better to check than to panic
-		return errors.New("error getting data from database")
+	if !ok {
+		return errBadData
 	}
 
-	// Fill out the response with the block's data
 	reply.APIBlock.ID = block.ID().String()
-	reply.APIBlock.Timestamp = block.Timestamp
+	reply.APIBlock.Timestamp = json.Uint64(block.Timestamp)
 	reply.APIBlock.ParentID = block.ParentID().String()
-	byteFormatter := formatting.CB58{Bytes: block.Data[:]}
-	reply.Data = byteFormatter.String()
+	reply.Data, err = formatting.Encode(formatting.CB58, block.Data[:])
 
-	return nil
+	return err
 }
